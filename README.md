@@ -1,2 +1,3 @@
-# douban-album-catcher
-A tool to help download album from douban.com
+# 豆瓣相册下载助手
+
+用于下载豆瓣相册内容

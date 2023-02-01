@@ -1,0 +1,7 @@
+# 下载库
+requests==2.28.1
+# 解析库
+beautifulsoup4==4.11.1
+lxml==4.9.2
+# 数据库框架
+peewee==3.15.4
