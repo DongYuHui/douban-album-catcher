@@ -89,6 +89,7 @@ class Image(BaseModel):
                 self.album_id,
                 self.order_index,
                 self.name,
+                self.note,
                 self.url_normal,
                 self.url_large,
                 self.url_raw,
