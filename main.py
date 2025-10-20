@@ -10,7 +10,7 @@ if __name__ == "__main__":
 
     # 获取相册
     # album_url = "https://www.douban.com/photos/album/1874833760"
-    album_url = "https://www.douban.com/photos/album/1887978860"
+    album_url = "https://www.douban.com/photos/album/106323932"
     album_info = catch_album_info(album_url)
     if album_info == None:
         print("获取相册信息失败")
@@ -20,7 +20,7 @@ if __name__ == "__main__":
         album_info.id = album_query.id
     album_info.save()
 
-    # 获取图片
+    # 获取图片，按页遍历
     for index in range(album_info.page_total):
 
         # 获取分页
