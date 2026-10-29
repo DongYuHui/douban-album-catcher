@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -133,18 +133,14 @@ def catch_image_note(imageUrl):
 
 
 def download_image(image, directory):
-    # 判断目录是否存在
-    dir_exist = os.path.exists(directory)
-    if not dir_exist:
-        os.makedirs(directory)
-    # 判断本地文件是否存在
-    file_path_prefix = directory if directory.endswith("/") else directory + "/"
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
     file_index = "{:0>4d}".format(image.order_index)
-    file_path = file_path_prefix + file_index + "-" + image.name
-    file_exist = os.path.exists(file_path)
+    file_path = directory / (file_index + "-" + image.name)
+    file_exist = file_path.exists()
     if image.file_size != None and file_exist:
         # 如果本地文件的大小符合下载文件的大小，则无须重复下载
-        file_size = os.path.getsize(file_path)
+        file_size = file_path.stat().st_size
         if image.file_size == file_size:
             print("图片已存在，跳过下载：" + file_index + " - " + image.name)
             return
