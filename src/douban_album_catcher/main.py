@@ -1,9 +1,9 @@
 import sys
 
-from data_model import Album, Image, init_database
-from http_douban import catch_album_info, catch_album_page, download_image
+from .data_model import Album, Image, init_database
+from .http_douban import catch_album_info, catch_album_page, download_image
 
-if __name__ == "__main__":
+def main() -> None:
 
     # 初始化数据库
     init_database("album.db")
@@ -42,3 +42,7 @@ if __name__ == "__main__":
                 download_image(image_item, "image/")
             except BaseException:
                 print("下载图片异常：%s" % str(image_item))
+
+
+if __name__ == "__main__":
+    main()
