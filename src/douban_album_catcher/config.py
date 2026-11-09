@@ -10,7 +10,7 @@ from pathlib import Path
 from platformdirs import user_config_path, user_data_path, user_pictures_path
 
 APP_NAME = "Douban Album Catcher"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class ConfigError(Exception):
@@ -23,6 +23,7 @@ class AppSettings:
     database_path: Path
     download_directory: Path
     request_interval_seconds: float
+    page_query_interval_seconds: float = 3.0
 
 
 def default_config_path() -> Path:
@@ -68,22 +69,26 @@ def _settings(values: object) -> AppSettings:
         raise ConfigError(f"未知配置字段：{', '.join(sorted(unknown))}")
     defaults = asdict(default_settings())
     defaults.update(values)
-    version = defaults["schema_version"]
-    if type(version) is not int or version != SCHEMA_VERSION:
-        raise ConfigError(f"不支持的 schema_version：{version}，当前仅支持 {SCHEMA_VERSION}")
-    interval = defaults["request_interval_seconds"]
-    try:
-        valid_interval = type(interval) in (int, float) and math.isfinite(interval) and interval >= 0
-    except OverflowError:
-        valid_interval = False
-    if not valid_interval:
-        raise ConfigError("request_interval_seconds 必须是有限的非负数（秒）")
+    version = values.get("schema_version", 1)
+    if type(version) is not int or version not in (1, SCHEMA_VERSION):
+        raise ConfigError(f"不支持的 schema_version：{version}，当前支持 1、{SCHEMA_VERSION}")
+    # 版本 1 在内存中迁移，不在读取时重写用户文件。
+    intervals = {}
+    for field in ("request_interval_seconds", "page_query_interval_seconds"):
+        interval = defaults[field]
+        try:
+            valid = type(interval) in (int, float) and math.isfinite(interval) and interval >= 0
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ConfigError(f"{field} 必须是有限的非负数（秒）")
+        intervals[field] = float(interval)
     # 默认值中的 Path 与 JSON 中的字符串走同一套校验。
     return AppSettings(
-        schema_version=version,
+        schema_version=SCHEMA_VERSION,
         database_path=_path(values.get("database_path", str(defaults["database_path"])), "database_path", directory=False),
         download_directory=_path(values.get("download_directory", str(defaults["download_directory"])), "download_directory", directory=True),
-        request_interval_seconds=float(interval),
+        **intervals,
     )
 
 

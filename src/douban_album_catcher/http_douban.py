@@ -1,5 +1,7 @@
-from pathlib import Path
+"""豆瓣页面解析与单图下载；不负责分页等待或数据库事务编排。"""
+
 import re
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -12,158 +14,111 @@ headers = {
 }
 
 
-def catch_album_info(url):
-    """获取相册信息
+class DoubanResponseError(Exception):
+    """网络响应或页面结构不符合预期。"""
 
-    Args:
-        url: 相册地址
 
-    Returns:
-        相册信息
-    """
-    url = urljoin(url, urlparse(url).path)
-    response = requests.get(url, headers=headers)
+def _get(url, *, referer=None):
+    request_headers = headers.copy()
+    if referer is not None:
+        request_headers["Referer"] = referer
+    response = requests.get(url, headers=request_headers, timeout=30)
     if response.status_code != 200:
-        print("catch album info error " + str(response.status_code))
-        return None
+        raise DoubanResponseError(f"请求 {url} 返回 HTTP {response.status_code}")
+    return response
+
+
+def _page(url):
+    response = _get(url)
+    # 登录/验证跳转即使最终返回 200，也不能当作成功页面。
+    final_url = getattr(response, "url", url)
+    path = urlparse(final_url).path.lower()
+    if any(part in path for part in ("captcha", "login", "passport")):
+        raise DoubanResponseError(f"页面要求登录或验证：{final_url}")
     soup = BeautifulSoup(response.text, "lxml")
-    # 一、相册信息
-    album = Album()
-    # 1.1 地址
-    album.url = url
-    # 1.2 标题
-    album.title = soup.title.string
-    # 1.3 描述
-    soupDesc = soup.find("p", class_="description")
-    album.description = soupDesc.string if soupDesc.string != None else ""
-    # 1.4 数量
-    soupCountSpan = soup.find("div", class_="photitle").span
-    soupCountStr = re.findall(r"\d+", soupCountSpan.string)
-    album.count = int(soupCountStr[0]) if len(soupCountStr) > 0 else None
-    # 二、分页信息
-    # 2.1 每页数量
-    album.page_size = 18  # 目前豆瓣固定的 18 个每页
-    # 2.2 分页总数
-    soupPage = soup.find("div", class_="paginator")
-    if soupPage != None:
-        soupPageInfo = soupPage.find("span", class_="thispage")
-        album.page_total = int(soupPageInfo["data-total-page"])
-    else:
-        album.page_total = 1  # 没有分页说明只有一页
-    # 三、输出信息
-    print("相册信息：%s" % album)
-    return album
+    if soup.select_one('input[name="captcha-solution"], input[name="captcha"]'):
+        raise DoubanResponseError(f"页面要求验证码：{url}")
+    return soup
+
+
+def catch_album_info(url):
+    url = urljoin(url, urlparse(url).path)
+    soup = _page(url)
+    count_element = soup.select_one("div.photitle span")
+    if soup.title is None or count_element is None:
+        raise DoubanResponseError("缺少相册标题或图片数量，可能是拦截页面")
+    count_match = re.search(r"\d+", count_element.get_text())
+    if count_match is None:
+        raise DoubanResponseError("无法解析相册图片数量")
+    description = soup.select_one("p.description")
+    paginator = soup.select_one("div.paginator")
+    count = int(count_match.group())
+    page_total = 1 if count else 0
+    if paginator is not None:
+        current = paginator.select_one("span.thispage[data-total-page]")
+        if current is None:
+            raise DoubanResponseError("缺少分页总数")
+        try:
+            page_total = int(current["data-total-page"])
+        except (TypeError, ValueError) as exc:
+            raise DoubanResponseError("分页总数格式错误") from exc
+    return Album(title=soup.title.get_text(strip=True), url=url,
+                 description=description.get_text() if description else "",
+                 count=count, page_size=18, page_total=page_total)
 
 
 def catch_album_page(album, start):
-    """获取图片分页
-
-    Args:
-        album: 相册信息
-        start: 分页开始索引
-
-    Returns:
-        图片列表
-    """
-    url = album.url + "?m_start=" + str(start)
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(
-            "catch album page error, url: [%s], status_code: [%d] "
-            & (url, response.status_code)
-        )
-        return None
-    soup = BeautifulSoup(response.text, "lxml")
-    # 一、获取图片列表
-    soupImageBox = soup.find("div", class_="photolst")
-    soupImageList = soup.find_all("a", class_="photolst_photo")
-    # 二、获取图片
+    soup = _page(album.url + "?m_start=" + str(start))
+    box = soup.select_one("div.photolst")
+    if box is None:
+        raise DoubanResponseError("缺少相册图片列表，可能是验证码或登录页面")
     images = []
-    for index in range(len(soupImageList)):
-        soupImageItem = soupImageList[index]
-        imageUrl = soupImageItem.img["src"]
-        # 组装图片信息
-        image = Image()
-        image.album_id = album.id
-        # 2.1 排序
-        image.order_index = start + index + 1
-        # 2.2 编码
-        image_name_start = imageUrl.rfind("/")
-        image.name = imageUrl[image_name_start + 1 :]
-        # 2.3 描述
-        imagePageUrl = soupImageItem["href"]
-        image.note = catch_image_note(imagePageUrl)
-        # 2.4 地址
-        image.url_normal = imageUrl
-        image.url_large = imageUrl.replace("/m/", "/l/")
-        image.url_raw = imageUrl.replace("/m/", "/r/")
-        images.append(image)
-    # 三、输出信息
-    image_names = map(lambda item: item.name, images)
-    print("图片分页信息：%s" % str(list(image_names)))
+    for index, item in enumerate(box.select("a.photolst_photo")):
+        photo = item.find("img")
+        if photo is None or not photo.get("src") or not item.get("href"):
+            raise DoubanResponseError("分页图片缺少地址或详情链接")
+        image_url = urljoin(album.url, photo["src"])
+        print(f"采集图片信息：{image_url} - {photo["src"]}")
+        name = urlparse(image_url).path.rsplit("/", 1)[-1]
+        if not name:
+            raise DoubanResponseError("图片文件名为空")
+        note = catch_image_note(urljoin(album.url, item["href"]))
+        images.append(Image(album_id=album.id, order_index=start + index + 1,
+                            name=name, note=note, url_normal=image_url,
+                            url_large=image_url.replace("/m/", "/l/"),
+                            url_raw=image_url.replace("/m/", "/r/")))
     return images
 
 
-def catch_image_note(imageUrl):
-    """获取图片描述
-
-    Args:
-        imageUrl: 图片地址
-
-    Returns:
-        图片列表
-    """
-    url = imageUrl
-    print("图片信息地址：%s" % str(url))
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        print(
-            "catch image info error, url: [%s], status_code: [%d] "
-            & (url, response.status_code)
-        )
-        return None
-    soup = BeautifulSoup(response.text, "lxml")
-    # 获取图片描述
-    descBox = soup.find("div", class_="photo_descri")
-    imageNote = None
-    if descBox != None:
-        imageNote = descBox.div.string
-    print("图片描述信息：%s" % str(imageNote))
-    return imageNote
+def catch_image_note(image_url):
+    soup = _page(image_url)
+    if soup.select_one("#content") is None or soup.select_one(".photo-show, .photo-wp, #image") is None:
+        raise DoubanResponseError("缺少图片详情结构，可能是拦截页面")
+    description = soup.select_one("div.photo_descri")
+    return description.get_text(strip=True) if description else ""
 
 
-def download_image(image, directory):
+def download_image(image, directory) -> bool:
+    """下载成功返回 True，已有相同大小文件返回 False，失败抛出异常。"""
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    file_index = "{:0>4d}".format(image.order_index)
+    file_index = f"{image.order_index:04d}"
     file_path = directory / (file_index + "-" + image.name)
-    file_exist = file_path.exists()
-    if image.file_size != None and file_exist:
-        # 如果本地文件的大小符合下载文件的大小，则无须重复下载
-        file_size = file_path.stat().st_size
-        if image.file_size == file_size:
-            print("图片已存在，跳过下载：" + file_index + " - " + image.name)
-            return
-    # 下载文件
-    response = requests.get(image.url_raw, headers=headers)
-    if response.status_code != 200:
-        print(
-            "图片下载失败："
-            + file_index
-            + " - "
-            + image.name
-            + " - "
-            + str(response.status_code)
-        )
-    with open(file_path, "wb") as f:
-        f.write(response.content)
-    # 保存文件大小
-    response_length = response.headers.get("Content-Length")
-    image_update = Image.update({Image.file_size: int(response_length)}).where(
-        Image.id == image.id
-    )
-    effect_row = image_update.execute()
-    if effect_row != 1:
-        print("图片下载成功，但更新记录失败：" + file_index + " - " + image.name)
-    else:
-        print("图片下载成功：" + file_index + " - " + image.name)
+    if image.file_size is not None and file_path.is_file():
+        if image.file_size == file_path.stat().st_size:
+            print(f"图片已存在，跳过下载：{file_index} - {image.name}")
+            return False
+    # 图片 CDN 会拒绝没有豆瓣来源信息的直链请求（HTTP 418）。
+    response = _get(image.url_raw, referer="https://www.douban.com/")
+    if "text/html" in response.headers.get("Content-Type", "").lower():
+        raise DoubanResponseError(f"图片地址返回了 HTML：{image.url_raw}")
+    if not response.content:
+        raise DoubanResponseError(f"图片响应为空：{image.url_raw}")
+    directory.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(response.content)
+    # requests 可能解压响应，使用实际写入长度而非传输 Content-Length。
+    size = len(response.content)
+    updated = Image.update(file_size=size).where(Image.id == image.id).execute()
+    if updated != 1:
+        raise DoubanResponseError(f"图片已写入，但数据库更新失败：{image.name}")
+    print(f"图片下载成功：{file_index} - {image.name}")
+    return True

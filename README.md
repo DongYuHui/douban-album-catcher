@@ -30,6 +30,18 @@ uv run python -m douban_album_catcher
 
 原根目录下的 `main.py`、`data_model.py` 和 `http_douban.py` 已迁入包中。原 `http_douban.py` 的重复下载入口统一到上述命令；模块导入本身不会启动下载。
 
+## 采集与下载流程
+
+程序先获取并保存相册基本信息，再逐页采集图片元数据。每页使用独立事务保存，提交成功后等待 `page_query_interval_seconds` 秒，再查询下一页。所有分页均成功且去重后的图片数量与相册声明一致，才进入下载阶段。
+
+下载只处理本次采集到的图片，按相册顺序执行，历史残留记录保留但不自动下载。已有图片的元数据会更新；原图地址变化时清空大小记录以重新下载，地址不变则沿用已有文件跳过机制。
+
+分页采集、解析或保存失败时，不开始下载，已成功提交的页保留。重新运行会重新采集全部分页，不从失败页续查。同名图片属于另一个相册时会报错，避免覆盖归属。
+
+单张图片下载失败后继续处理其余图片，最后汇总下载、跳过和失败数量；采集失败或有下载失败时以非零状态退出。Ctrl+C 会停止任务并以状态码 `130` 退出。
+
+分页间隔仅作用于两页之间。同一页内的图片说明请求、相册信息请求和图片文件请求尚无通用限速；该参数不能保证避免反爬限制。
+
 ## 项目结构
 
 ```text
@@ -41,6 +53,7 @@ uv run python -m douban_album_catcher
 │   └── douban_album_catcher/
 │       ├── __init__.py
 │       ├── __main__.py
+│       ├── album_service.py
 │       ├── config.py
 │       ├── startup.py
 │       ├── main.py
@@ -89,8 +102,8 @@ Peewee 已从 3.x 升级到 4.x。升级验证使用临时 SQLite 数据库检�
 
 | 平台 | 配置文件 |
 | --- | --- |
-| macOS | `~/Library/Application Support/DoubanAlbumCatcher/config.json` |
-| Windows | `%LOCALAPPDATA%\DoubanAlbumCatcher\config.json` |
+| macOS | `~/Library/Application Support/Douban Album Catcher/config.json` |
+| Windows | `%LOCALAPPDATA%\Douban Album Catcher\config.json` |
 
 启动时会打印实际配置位置。也可以指定其他配置文件：
 
@@ -102,17 +115,19 @@ uv run douban-album-catcher --config /absolute/path/config.json
 
 ```json
 {
-  "schema_version": 1,
-  "database_path": "/Users/example/Library/Application Support/DoubanAlbumCatcher/album.db",
+  "schema_version": 2,
+  "database_path": "/Users/example/Library/Application Support/Douban Album Catcher/album.db",
   "download_directory": "/Users/example/Pictures/DoubanAlbums",
-  "request_interval_seconds": 3.0
+  "request_interval_seconds": 3.0,
+  "page_query_interval_seconds": 3.0
 }
 ```
 
 - `database_path`：数据库文件路径，默认位于用户应用数据目录。
 - `download_directory`：下载目录，默认是用户图片目录下的 `DoubanAlbums`。
 - `request_interval_seconds`：有限的非负数，单位为秒。**当前仅保存和校验，尚未接入网络限速**，不能靠该值防止触发反爬限制。
-- `schema_version`：当前为整数 `1`，暂不支持其他版本。
+- `page_query_interval_seconds`：相邻分页之间的等待秒数，默认 `3.0`，允许有限非负数；`0` 表示不等待。第一页前、最后一页后和图片下载之间不会因该参数等待。
+- `schema_version`：当前为整数 `2`；兼容读取版本 `1`（或缺失版本号），在内存中补齐分页间隔并升级。读取不重写原文件，主动保存时写入版本 `2`；降级前应备份配置，旧程序无法读取版本 `2`。
 
 关闭程序后修改 JSON，重新启动生效。路径支持 `~`，展开后必须为绝对路径。缺失字段使用默认值；拼错的未知字段、非法值和损坏 JSON 会导致启动失败，原文件保留，不会自动覆盖或切换到新数据库。修正文件即可重试。若需要恢复默认配置，请先备份原文件，再移走它并重新启动。
 

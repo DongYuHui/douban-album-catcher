@@ -15,7 +15,7 @@ class ConfigTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
-        self.defaults = AppSettings(1, self.root / 'data' / 'album.db', self.root / '中文 图片', 3.0)
+        self.defaults = AppSettings(2, self.root / 'data' / 'album.db', self.root / '中文 图片', 3.0)
         self.patcher = patch.object(config, 'default_settings', return_value=self.defaults)
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
@@ -39,12 +39,42 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(loaded.database_path, self.defaults.database_path)
         self.assertEqual(loaded.download_directory, Path.home() / '相册')
 
+    def test_version_one_migrates_in_memory_and_save_writes_version_two(self):
+        for version in (None, 1):
+            with self.subTest(version=version):
+                values = {'database_path': str(self.defaults.database_path),
+                          'download_directory': str(self.defaults.download_directory),
+                          'request_interval_seconds': 7.5}
+                if version is not None:
+                    values['schema_version'] = version
+                self.write(values)
+                original = self.store.path.read_bytes()
+                settings = self.store.load()
+                self.assertEqual(settings.schema_version, 2)
+                self.assertEqual(settings.request_interval_seconds, 7.5)
+                self.assertEqual(settings.page_query_interval_seconds, 3)
+                self.assertEqual(settings.database_path, self.defaults.database_path)
+                self.assertEqual(self.store.path.read_bytes(), original)
+                self.store.save(settings)
+                saved = json.loads(self.store.path.read_text())
+                self.assertEqual(saved['schema_version'], 2)
+                self.assertEqual(saved['page_query_interval_seconds'], 3)
+
+    def test_custom_page_interval_round_trip_and_invalid_save(self):
+        settings = replace(self.defaults, page_query_interval_seconds=0.25)
+        self.store.save(settings)
+        self.assertEqual(self.store.load(), settings)
+        original = self.store.path.read_bytes()
+        with self.assertRaises(ConfigError):
+            self.store.save(replace(settings, page_query_interval_seconds=float('nan')))
+        self.assertEqual(self.store.path.read_bytes(), original)
+
     def test_invalid_files_are_preserved(self):
-        invalid = [[], {'typo': 1}, {'schema_version': 2}, {'schema_version': True},
+        invalid = [[], {'typo': 1}, {'schema_version': 3}, {'schema_version': True},
                    {'database_path': 'relative.db'}, {'download_directory': ''},
                    {'database_path': 123}, {'database_path': '\0'}]
-        invalid += [{'request_interval_seconds': value} for value in
-                    (-1, True, '3', None, float('nan'), float('inf'), -float('inf'), 10 ** 400)]
+        invalid += [{field: value} for field in ('request_interval_seconds', 'page_query_interval_seconds')
+                    for value in (-1, True, '3', None, float('nan'), float('inf'), -float('inf'), 10 ** 400)]
         for value in invalid:
             with self.subTest(value=value):
                 self.write(value)
@@ -147,7 +177,7 @@ class ConfigTests(unittest.TestCase):
         # 验证跨平台目录适配接口，真实 Windows 行为仍需在 Windows 实测。
         with patch.object(config, 'user_config_path', return_value=self.root / 'config') as get:
             self.assertEqual(config.default_config_path(), self.root / 'config' / 'config.json')
-            get.assert_called_once_with('DoubanAlbumCatcher', appauthor=False)
+            get.assert_called_once_with(config.APP_NAME, appauthor=False)
         self.patcher.stop()
         with patch.object(config, 'user_data_path', return_value=self.root / 'data'), patch.object(config, 'user_pictures_path', return_value=self.root / 'pictures'):
             self.assertEqual(config.default_settings().download_directory, self.root / 'pictures' / 'DoubanAlbums')
