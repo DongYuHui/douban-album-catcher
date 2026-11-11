@@ -1,12 +1,14 @@
 """相册任务：分页采集全部成功后，下载本次采集的图片。"""
 
 import datetime
+import re
 import time
 from dataclasses import dataclass
 
 from .config import AppSettings
 from .data_model import Album, Image, db
-from .http_douban import catch_album_info, catch_album_page, download_image
+from .download_policy import DownloadPolicy
+from .http_douban import DownloadRateLimited, catch_album_info, catch_album_page, download_image
 
 
 class AlbumTaskError(Exception):
@@ -55,7 +57,7 @@ def _save_page(album, images):
             if existing is None:
                 saved = Image.create(name=image.name, **values)
             else:
-                if existing.url_raw != image.url_raw:
+                if existing.url_raw != image.url_raw or existing.url_normal != image.url_normal:
                     values["file_size"] = None
                 Image.update(**values).where(Image.id == existing.id).execute()
                 saved = existing
@@ -63,10 +65,23 @@ def _save_page(album, images):
     return ids
 
 
+def _album_directory_name(album):
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', album.title).rstrip(" .")
+    if not name:
+        return f"相册-{album.id}"
+
+    # Windows 也会将带扩展名的设备名视为保留名称。
+    stem = name.split(".", 1)[0].rstrip(" ").upper()
+    if re.fullmatch(r"(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])", stem):
+        return "_" + name
+    return name
+
+
 def run_album_task(url: str, settings: AppSettings, *, wait=None) -> DownloadResult:
     """同步执行一次任务；wait 可注入，避免测试真实等待。"""
     if wait is None:
         wait = time.sleep
+    policy = DownloadPolicy(retry_interval_seconds=settings.request_interval_seconds)
     stage = "获取并保存相册信息"
     try:
         album = catch_album_info(url)
@@ -99,6 +114,14 @@ def run_album_task(url: str, settings: AppSettings, *, wait=None) -> DownloadRes
         if len(ids) != album.count:
             raise AlbumTaskError(f"本次采集 {len(ids)} 张，声明 {album.count} 张，数据不完整，请重新采集")
 
+        if not ids:
+            print("相册没有图片可下载")
+            return DownloadResult(0, 0, 0, ())
+
+        stage = "创建相册下载目录"
+        directory = settings.download_directory / _album_directory_name(album)
+        directory.mkdir(parents=True, exist_ok=True)
+
         # 不使用无界 IN 参数列表；按相册顺序流式扫描，过滤历史残留记录。
         print(f"全部分页已保存，开始下载 {len(ids)} 张图片")
         downloaded = skipped = 0
@@ -109,10 +132,15 @@ def run_album_task(url: str, settings: AppSettings, *, wait=None) -> DownloadRes
                 continue
             stage = f"下载图片 {image.name}"
             try:
-                if download_image(image, settings.download_directory):
+                if download_image(image, directory, policy=policy, wait=wait):
                     downloaded += 1
                 else:
                     skipped += 1
+            except DownloadRateLimited as exc:
+                failures.append((image.name, str(exc)))
+                remaining = len(ids) - downloaded - skipped - len(failures)
+                print(f"下载失败：{image.name}；原因：{exc}；因限流未处理 {remaining} 张")
+                break
             except Exception as exc:
                 failures.append((image.name, str(exc)))
                 print(f"下载失败：{image.name}；原因：{exc}")

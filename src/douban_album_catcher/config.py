@@ -9,6 +9,8 @@ from pathlib import Path
 
 from platformdirs import user_config_path, user_data_path, user_pictures_path
 
+from .download_policy import DEFAULT_REQUEST_INTERVAL_SECONDS
+
 APP_NAME = "Douban Album Catcher"
 SCHEMA_VERSION = 2
 
@@ -35,7 +37,7 @@ def default_settings() -> AppSettings:
         schema_version=SCHEMA_VERSION,
         database_path=user_data_path(APP_NAME, appauthor=False) / "album.db",
         download_directory=user_pictures_path() / "DoubanAlbums",
-        request_interval_seconds=3.0,
+        request_interval_seconds=DEFAULT_REQUEST_INTERVAL_SECONDS,
     )
 
 

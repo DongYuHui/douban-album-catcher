@@ -36,21 +36,24 @@ class StartupTests(unittest.TestCase):
             settings = AppSettings(2, root / '数据库' / 'album.db', root / '图片 文件', 1.5)
             store = ConfigStore(root / 'config.json')
             store.save(settings)
-            album = Album(title='测试', url='https://example.com/album', description='', count=1, page_total=1, page_size=18)
+            album = Album(title='测试/旅行:照片? . ', url='https://example.com/album', description='', count=1, page_total=1, page_size=18)
             image = Image(order_index=1, name='test.jpg', note='', url_normal='', url_large='', url_raw='https://example.com/photo')
 
             def page(saved_album, start):
                 image.album_id = saved_album.id
                 return [image]
 
-            response = SimpleNamespace(status_code=200, content=b'image', headers={'Content-Length': '5'})
+            content = b'\xff\xd8\xffimage'
+            response = SimpleNamespace(
+                status_code=200, content=content, headers={'Content-Length': str(len(content))}
+            )
             try:
                 with patch.object(service, 'catch_album_info', return_value=album), patch.object(service, 'catch_album_page', side_effect=page), patch.object(http.requests, 'get', return_value=response) as request:
                     app.main(['--config', str(store.path)])
                     self.assertEqual(db.database, str(settings.database_path))
                     db.connect()
-                    self.assertEqual(Image.get(Image.name == image.name).file_size, 5)
-                    self.assertEqual((settings.download_directory / '0001-test.jpg').read_bytes(), b'image')
+                    self.assertEqual(Image.get(Image.name == image.name).file_size, len(content))
+                    self.assertEqual((settings.download_directory / '测试旅行照片' / '0001-test.jpg').read_bytes(), content)
                     db.close()
                     app.main(['--config', str(store.path)])
                     self.assertEqual(request.call_count, 1)

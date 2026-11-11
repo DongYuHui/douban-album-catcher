@@ -20,7 +20,7 @@ def main(argv=None) -> None:
         settings.database_path.parent.mkdir(parents=True, exist_ok=True)
         init_database(str(settings.database_path))
         print(f"配置文件：{store.path}")
-        print("提示：request_interval_seconds 尚未接入通用请求限速；分页间隔已生效。")
+        print("提示：request_interval_seconds 控制同一张图的备用地址请求间隔；page_query_interval_seconds 控制分页间隔。")
         # album_url = "https://www.douban.com/photos/album/1887978860"
         album_url = "https://www.douban.com/photos/album/1691221449"
         result = run_album_task(album_url, settings)

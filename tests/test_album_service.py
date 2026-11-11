@@ -1,11 +1,14 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import tempfile
 from contextlib import closing
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from douban_album_catcher import album_service as service
+from douban_album_catcher import album_service as service, http_douban
 from douban_album_catcher.config import AppSettings
 from douban_album_catcher.data_model import Album, Image, db, init_database
 
@@ -49,7 +52,11 @@ class AlbumServiceTests(unittest.TestCase):
                 self.assertEqual(connection.execute('select count(*) from image').fetchone()[0], events.count('wait') + 1)
             events.append('wait')
 
-        def download(image, directory):
+        def download(image, directory, *, policy, wait):
+            self.assertEqual(directory, self.settings.download_directory / self.album.title)
+            self.assertTrue(directory.is_dir())
+            self.assertEqual(policy.retry_interval_seconds, 3)
+            self.assertTrue(callable(wait))
             self.assertEqual(Image.select().count(), 3)
             events.append(f'download{image.order_index}')
             return True
@@ -143,6 +150,7 @@ class AlbumServiceTests(unittest.TestCase):
             query.assert_not_called()
             download.assert_not_called()
         self.assertEqual(result.collected, 0)
+        self.assertFalse(self.settings.download_directory.exists())
         for field, value in [('page_total', -1), ('page_size', 0), ('count', -1), ('count', None)]:
             with self.subTest(field=field, value=value):
                 original = getattr(self.album, field)
@@ -166,7 +174,7 @@ class AlbumServiceTests(unittest.TestCase):
         self.album.count, self.album.page_total = 2, 2
         pages = [[self.image('new.jpg', 2)], [self.image('same.jpg', 1), self.image('same.jpg', 1)]]
         seen = []
-        with patch.object(service, 'catch_album_page', side_effect=pages), patch.object(service, 'download_image', side_effect=lambda image, directory: seen.append(image) or True):
+        with patch.object(service, 'catch_album_page', side_effect=pages), patch.object(service, 'download_image', side_effect=lambda image, directory, **kwargs: seen.append(image) or True):
             self.run_task(wait=Mock())
         self.assertEqual([image.name for image in seen], ['same.jpg', 'new.jpg'])
         self.assertEqual(seen[0].id, existing.id)
@@ -174,13 +182,61 @@ class AlbumServiceTests(unittest.TestCase):
         self.assertEqual(Image.select().count(), 3)
         self.album.count = self.album.page_total = 1
         changed = self.image('same.jpg', 1)
-        changed.url_raw = 'https://example.com/changed'
-        changed.note = 'updated'
-        with patch.object(service, 'catch_album_page', return_value=[changed]), patch.object(service, 'download_image', return_value=True):
-            self.run_task()
-        saved = Image.get_by_id(existing.id)
-        self.assertIsNone(saved.file_size)
-        self.assertEqual(saved.note, 'updated')
+        for field in ('url_normal', 'url_raw'):
+            with self.subTest(field=field):
+                Image.update(file_size=123).where(Image.id == existing.id).execute()
+                setattr(changed, field, 'https://example.com/changed')
+                changed.note = 'updated'
+                with patch.object(service, 'catch_album_page', return_value=[changed]), patch.object(service, 'download_image', return_value=True):
+                    self.run_task()
+                saved = Image.get_by_id(existing.id)
+                self.assertIsNone(saved.file_size)
+                self.assertEqual(saved.note, 'updated')
+
+    def test_album_directory_filters_illegal_characters_and_windows_names(self):
+        self.album.id = 42
+        for title, expected in (
+            ('<春>:"游/记\\|?*\x00\x1f . ', '春游记'),
+            ('../', '相册-42'),
+            ('nul.txt', '_nul.txt'),
+            ('LPT¹', '_LPT¹'),
+        ):
+            with self.subTest(title=title):
+                self.album.title = title
+                self.assertEqual(service._album_directory_name(self.album), expected)
+
+    def test_existing_file_at_album_directory_path_stops_before_download(self):
+        self.album.count = self.album.page_total = 1
+        directory = self.settings.download_directory / self.album.title
+        directory.parent.mkdir()
+        directory.write_bytes(b'existing')
+        with patch.object(service, 'catch_album_page', return_value=[self.image('photo.jpg', 1)]), patch.object(
+            service, 'download_image',
+        ) as download:
+            with self.assertRaisesRegex(service.AlbumTaskError, '创建相册下载目录'):
+                self.run_task()
+        download.assert_not_called()
+        self.assertEqual(directory.read_bytes(), b'existing')
+
+    def test_rate_limit_stops_remaining_downloads(self):
+        self.album.page_total = 1
+        self.album.page_size = 18
+        images = [self.image(f'{index}.jpg', index) for index in range(3)]
+        images[0].url_normal = 'https://example.com/normal.jpg'
+        wait = Mock()
+        with patch.object(service, 'catch_album_page', return_value=images), patch.object(
+            http_douban.requests, 'get', side_effect=[
+                SimpleNamespace(status_code=404), SimpleNamespace(status_code=429),
+            ],
+        ) as get, redirect_stdout(StringIO()) as log:
+            result = self.run_task(wait=wait)
+        self.assertEqual([request.args[0] for request in get.call_args_list],
+                         [images[0].url_raw, images[0].url_normal])
+        wait.assert_called_once_with(3)
+        self.assertEqual((result.collected, result.downloaded, result.skipped), (3, 0, 0))
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn('HTTP 429', result.failures[0][1])
+        self.assertIn('因限流未处理 2 张', log.getvalue())
 
 
 if __name__ == '__main__':
